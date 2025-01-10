@@ -1,0 +1,33 @@
+{
+  "name": "lab6",
+  "version": "1.0.0",
+  "main": "Consumer.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "consumer": "nodemon Consumer.js",
+    "producer": "nodemon Producer.js",
+    "task1": "nodemon Task1.js",
+    "task2": "nodemon Task2.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@faker-js/faker": "^9.3.0",
+    "amqplib": "^0.10.5",
+    "bcrypt": "^5.1.1",
+    "body-parser": "^1.20.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.2",
+    "mysql2": "^3.12.0",
+    "passport": "^0.7.0",
+    "passport-github2": "^0.1.12"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
