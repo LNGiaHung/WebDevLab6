@@ -1,41 +1,77 @@
 require('dotenv').config(); // Load environment variables
 const express = require('express');
-const bodyParser = require('body-parser');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const mysql = require('mysql2');
+const { Sequelize, DataTypes } = require('sequelize');
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+const shouldForceSync = process.env.FORCE_SYNC === 'true';
 
-const DB_CONFIG = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'jwt_auth',
-};
-
-const db = mysql.createConnection(DB_CONFIG);
-
-db.connect((err) => {
-  if (err) {
-    console.error('Database connection failed:', err.stack);
-    return;
+// Initialize Sequelize
+const sequelize = new Sequelize(
+  process.env.DB_NAME || 'jwt_auth',
+  process.env.DB_USER || 'root',
+  process.env.DB_PASSWORD || '',
+  {
+    host: process.env.DB_HOST || 'localhost',
+    dialect: 'mysql',
   }
-  console.log('Connected to MySQL database.');
+);
+
+// Define User model
+const User = sequelize.define('User', {
+  username: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true,
+  },
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  role: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
 });
 
-const query = (sql, values) => {
-  return new Promise((resolve, reject) => {
-    db.query(sql, values, (err, results) => {
-      if (err) return reject(err);
-      resolve(results);
-    });
-  });
-};
+// Define Token model
+const Token = sequelize.define('Token', {
+  token: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  loginTime: {
+    type: DataTypes.DATE,
+    allowNull: false,
+  },
+  loginAddress: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+});
+
+// Establish relationships
+User.hasMany(Token, { foreignKey: 'userId' });
+Token.belongsTo(User, { foreignKey: 'userId' });
+
+// Sync models with the database
+(async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('Connected to MySQL database.');
+
+    // Sync models conditionally based on FORCE_SYNC environment variable
+    await sequelize.sync({ force: shouldForceSync });
+    console.log(`Database synchronized. Force sync: ${shouldForceSync}`);
+  } catch (error) {
+    console.error('Unable to connect to the database:', error);
+  }
+})();
 
 // Registration endpoint
 app.post('/register', async (req, res) => {
@@ -47,11 +83,7 @@ app.post('/register', async (req, res) => {
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    await query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [
-      username,
-      hashedPassword,
-      role,
-    ]);
+    await User.create({ username, password: hashedPassword, role });
     res.status(201).json({ message: 'User registered successfully' });
   } catch (err) {
     console.error(err);
@@ -61,15 +93,14 @@ app.post('/register', async (req, res) => {
 
 // Login endpoint
 app.post('/login', async (req, res) => {
-  const { username, password, loginAddress } = req.body;
+  const { username, password } = req.body;
 
   if (!username || !password) {
     return res.status(400).json({ message: 'Username and password are required' });
   }
 
   try {
-    const users = await query('SELECT * FROM users WHERE username = ?', [username]);
-    const user = users[0];
+    const user = await User.findOne({ where: { username } });
 
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -80,19 +111,16 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    const loginTime = new Date().toISOString();
+    const loginAddress = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const loginTime = new Date();
+
     const token = jwt.sign(
       { id: user.id, role: user.role, loginTime, loginAddress },
       JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    await query('INSERT INTO tokens (user_id, token, login_time, login_address) VALUES (?, ?, ?, ?)', [
-      user.id,
-      token,
-      loginTime,
-      loginAddress
-    ]);
+    await Token.create({ userId: user.id, token, loginTime, loginAddress });
 
     res.status(200).json({ message: 'Login successful', token });
   } catch (err) {
@@ -103,7 +131,7 @@ app.post('/login', async (req, res) => {
 
 // Middleware to check admin role
 const checkAdminRole = (req, res, next) => {
-  const token = req.headers['authorization']?.split(' ')[1]; // Get token from Authorization header
+  const token = req.headers['authorization']?.split(' ')[1];
   if (!token) {
     return res.status(403).json({ message: 'No token provided' });
   }
@@ -115,7 +143,7 @@ const checkAdminRole = (req, res, next) => {
     if (decoded.role !== 'admin') {
       return res.status(403).json({ message: 'Access denied: Admins only' });
     }
-    req.userId = decoded.id; // Attach user ID to request
+    req.userId = decoded.id;
     next();
   });
 };
@@ -126,10 +154,16 @@ app.get('/admin', checkAdminRole, (req, res) => {
 });
 
 // Verify token endpoint
-app.get('/verify', async (req, res) => {
-  const token = req.query.token;
+app.get('/verify', (req, res) => {
+  const authorizationHeader = req.headers['authorization'];
+
+  if (!authorizationHeader) {
+    return res.status(400).json({ message: 'Authorization header is required' });
+  }
+
+  const token = authorizationHeader.split(' ')[1];
   if (!token) {
-    return res.status(400).json({ message: 'Token is required' });
+    return res.status(400).json({ message: 'Bearer token is missing' });
   }
 
   try {
@@ -142,13 +176,24 @@ app.get('/verify', async (req, res) => {
 
 // Logout endpoint
 app.post('/logout', async (req, res) => {
-  const token = req.body.token;
+  const authorizationHeader = req.headers['authorization'];
+
+  if (!authorizationHeader) {
+    return res.status(400).json({ message: 'Authorization header is required' });
+  }
+
+  const token = authorizationHeader.split(' ')[1];
   if (!token) {
-    return res.status(400).json({ message: 'Token is required' });
+    return res.status(400).json({ message: 'Bearer token is missing' });
   }
 
   try {
-    await query('DELETE FROM tokens WHERE token = ?', [token]);
+    const deletedCount = await Token.destroy({ where: { token } });
+
+    if (deletedCount === 0) {
+      return res.status(404).json({ message: 'Token not found or already logged out' });
+    }
+
     res.status(200).json({ message: 'Logout successful' });
   } catch (err) {
     console.error(err);
